@@ -1,0 +1,165 @@
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include "esp_system.h"
+//----------------------------------------------------------------------------------------------------------------------------------//
+//----------------------------------------TAreas para el loop2-----------------------------------------------------//
+ TaskHandle_t Task2;
+//-------------------------------------------LED-------------------------------------------------------------------//
+#define ON_Board_LED 2  //--> Defining an On Board LED, used for indicators when the process of connecting to a wifi router
+
+//----------------------------------------SSID and Password of your WiFi router-----------------------------------------------------//
+const char* ssid = "MovistarFibra-724C50";
+const char* password = "P94978203";
+//----------------------------------------Puertos y variables para ULTRASONICO----------------------------------------------//
+const int trigPin = 16;
+const int echoPin = 17;
+
+#define SOUND_VELOCITY 0.034
+long duration;
+float distanceCm;
+//----------------------------------------Puertos y variables para LM----------------------------------------------------//
+const int in1 = 4;
+const int in2 = 5;
+//----------------------------------------Timer--------------------------------------------//
+volatile boolean Enviar_data = false;
+const int wdtTimeout = 3000;  //time in ms to trigger the watchdog
+hw_timer_t *timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED; //para sincronizacion entre bucle principal e ISR
+//----------------------------------------------------------------------------------------------------------------------------------//
+unsigned int localPort = 8080;
+IPAddress DestinationIP(192,168,1,40); 
+WiFiUDP udp;
+
+char packetBuffer[50];
+String inString;
+byte SendBuffer[50];
+//--------------------------------------Timer---------------------------------------------//
+void IRAM_ATTR OnTimer() {
+  portENTER_CRITICAL_ISR(&timerMux); //inicio sección critica
+    if(Enviar_data == false){
+      Enviar_data = true; 
+    }   
+  portEXIT_CRITICAL_ISR(&timerMux); // fin sección critica
+}
+
+//-----------------------------------SETUP-------------------------------------------------//
+void setup() {
+//-------------------------SETUP de la tarea para el nucleo 0-------------------------//
+ xTaskCreatePinnedToCore(
+    loop2, //funcion que ejecuta la tarea
+    "Task_2", //Nombre de la tarea
+    1000, //tamaño de la pila
+    NULL, // parametros que le paso a la función
+    1, //prioridad....0 mayor prioridad
+    &Task2, //identificador de referencia a la tarea creada
+    0);// a que nucleo le asigno la tarea
+//------------------------------------------------------------------------------------//
+  // put your setup code here, to run once:
+  Serial.begin(115200);
+  delay(500);
+  pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output
+  pinMode(echoPin, INPUT); // Sets the echoPin as an Input
+  pinMode(in1, OUTPUT);// salidas para el control al LM
+  pinMode(in2, OUTPUT);
+  
+  WiFi.begin(ssid, password); //--> Connect to your WiFi router
+  Serial.println("");
+    
+  pinMode(ON_Board_LED,OUTPUT); 
+  digitalWrite(ON_Board_LED, HIGH); //--> Turn off Led On Board
+
+  //------------------------------------------Wait for connection
+  Serial.print("Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    //----------------------------------------Make the On Board Flashing LED on the process of connecting to the wifi router.
+    digitalWrite(ON_Board_LED, LOW);
+    delay(250);
+    digitalWrite(ON_Board_LED, HIGH);
+    delay(250);
+    //----------------------------------------
+  }
+  //------------------------------------------
+  digitalWrite(ON_Board_LED, HIGH); //--> Turn off the On Board LED when it is connected to the wifi router.
+  //----------------------------------------If successfully connected to the wifi router, the IP Address that will be visited is displayed in the serial monitor
+  Serial.println("");
+  Serial.print("Successfully connected to : ");
+  Serial.println(ssid);
+  Serial.print("NodeMCU IP address : ");
+  Serial.println(WiFi.localIP());
+  //------------------------------------------
+  udp.begin(localPort);
+  Serial.print("Local Port : ");
+  Serial.println(localPort);
+  //------------------------------------------timer setup
+  timer = timerBegin(0, 80, true);                  //timer 0, div 80
+  timerAttachInterrupt(timer, &OnTimer, true);  //funcion de manejo para interrupción 
+  timerAlarmWrite(timer, wdtTimeout * 1000, true); //set time in us
+  timerAlarmEnable(timer);                          //enable interrupt
+}
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------//
+
+//-----------------------------------------------------------------------------------------------LOOP---------------------------------------------------------------------------------------//
+void loop() {
+  // put your main code here, to run repeatedly:
+  receive_packet();
+  if (Enviar_data == true){
+  senseUS_and_send_packet();
+  Enviar_data = false;
+  } 
+}
+void loop2(void *parameter){
+  for(;;){
+    Serial.println("\t\t\tHola Mundo ");
+    delay(1000);
+    
+  }
+  vTaskDelay(10); //para que no salte un warning en el puerto serial
+}
+//-----------------------------------------Interrupcion------------------------------------------------------------------------------------------------------------------//
+
+
+//----------------------------------------Funciones recibir/enviar packets-------------------------------------------------------------------------------------------//
+void receive_packet() {
+  int packetSize = udp.parsePacket();
+  if (packetSize) {
+    IPAddress remoteIp = udp.remoteIP();
+    int len = udp.read(packetBuffer, 255);
+    if (len > 0) packetBuffer[len] = 0;
+    //Serial.print("From ");    //---|------------------------------------------------|
+    //Serial.print(remoteIp);   //---| Use this to find out what IP the text is from. |
+    //Serial.print(" : ");      //---|------------------------------------------------|
+    Serial.println(packetBuffer); 
+    if (strcmp(packetBuffer,"pwmon")==0)
+    {
+      digitalWrite(in1,HIGH);
+      Serial.print("motor encendido");
+    }
+    if (strcmp(packetBuffer,"pwmoff")==0)
+    {
+      digitalWrite(in1,LOW);
+    }
+  }
+}
+void senseUS_and_send_packet() {
+  // Clears the trigPin
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  // Sets the trigPin on HIGH state for 10 micro seconds
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  
+  // Reads the echoPin, returns the sound wave travel time in microseconds
+  duration = pulseIn(echoPin, HIGH);
+  // Calculate the distance
+  distanceCm = duration * SOUND_VELOCITY/2;
+  inString=""; // creo string vacio
+  inString.concat(distanceCm); // concateno la distancia
+  
+  
+      inString.getBytes(SendBuffer, 50); // convierto String a Byte y lo asocio al paquete a enviar
+      udp.beginPacket(DestinationIP, 8080);
+      udp.write(SendBuffer,50);
+      udp.endPacket();
+}
